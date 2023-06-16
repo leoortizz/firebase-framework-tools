@@ -1,20 +1,21 @@
-import { parse } from "url";
-
-import { default as next } from "next";
 import type { Response } from "express";
 import type { Request } from "firebase-functions/v2/https";
 import LRU from "lru-cache";
-import { NextServer } from "next/dist/server/next.js";
 
-import { simpleProxy } from "./utils.js";
+import { realSimpleProxy } from "./utils.js";
+import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 
-const nextAppsLRU = new LRU<string, NextServer>({
+type LRUCache = { host: string; spawnProcess: ChildProcessWithoutNullStreams };
+
+const nextAppsLRU = new LRU<string, LRUCache>({
   // TODO tune this
   max: 3,
   allowStale: true,
   updateAgeOnGet: true,
-  dispose: (server) => {
-    server.close();
+  dispose: ({ spawnProcess }) => {
+    console.log("Kill!");
+
+    spawnProcess.kill();
   },
 });
 
@@ -28,15 +29,39 @@ export const handle = async (req: Request, res: Response) => {
   // dynamic for middleware.
   let nextApp = nextAppsLRU.get(key);
   if (!nextApp) {
-    nextApp = next({
-      dev: false,
-      dir: process.cwd(),
-      hostname,
-      port,
-      customServer: false,
+    const promise = new Promise<LRUCache>((resolve, reject) => {
+      const serve = spawn("node", ["node_modules/.bin/next", "start", "--port", "3000"], {
+        cwd: process.cwd(),
+      });
+
+      serve.stdout.on("data", (data: any) => {
+        process.stdout.write(data);
+        const match = data.toString().match(/(http:\/\/.+:\d+)/);
+
+        if (match) {
+          resolve({
+            host: match[1],
+            spawnProcess: serve,
+          });
+        }
+      });
+
+      serve.stderr.on("data", (data: any) => {
+        process.stderr.write(data);
+      });
+
+      serve.on("exit", reject);
     });
 
-    nextAppsLRU.set(key, nextApp!);
+    const { host, spawnProcess } = await promise;
+    const cached = {
+      host,
+      spawnProcess,
+    };
+
+    nextAppsLRU.set(key, cached);
+
+    nextApp = cached;
   }
 
   // --- --- ----
@@ -52,15 +77,19 @@ export const handle = async (req: Request, res: Response) => {
   // --- --- ----
   // Trying to proxy the request:
   //
-  await nextApp.prepare();
-  const parsedUrl = parse(url, true);
-  const nextHandler = nextApp.getRequestHandler();
+  // await nextApp.prepare();
+  // const parsedUrl = parse(url, true);
+  // const nextHandler = nextApp.getRequestHandler();
 
-  const proxied = simpleProxy(async (req, res) => {
-    await nextHandler(req, res, parsedUrl);
-  });
-  proxied(req, res, () => {});
+  // if (!req.headers.proxied) {
+  //   const proxied = simpleProxy(async (req, res) => {
+  //     await nextHandler(req, res, parsedUrl);
+  //   });
+  //   proxied(req, res, () => {});
+  // }
   //
+  realSimpleProxy(nextApp.host)(req, res, req.next!);
+
   // --- --- ----
 };
 
