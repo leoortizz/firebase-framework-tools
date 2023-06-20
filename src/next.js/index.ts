@@ -56,13 +56,13 @@ export const handle = async (req: Request, res: Response) => {
   const parsedUrl = parse(url, true);
   const nextHandler = nextApp.getRequestHandler();
 
-  const proxied = simpleProxy(async (req, res) => {
-    await nextHandler(req, res, parsedUrl);
+  const proxied = simpleProxy(async (proxyReq, proxyRes) => {
+    await nextHandler(proxyReq, proxyRes, parsedUrl);
   });
-  proxied(req, res, () => {});
+  proxied(req, res, req.next!);
   //
   // --- --- ----
 };
 
-// curl -X POST https://fb-tools-dev.web.app/api -H "Content-type: application/json" -d '{ "query": "dolphin"}'
+// curl -X POST https://fb-tools-dev.web.app/api -H "Content-type: application/json" -d '{ "query": "dolphin" }'
 // curl https://fb-tools-dev.web.app/api

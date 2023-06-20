@@ -1,52 +1,59 @@
-import { request as httpRequest, Agent } from "https";
 import { RequestHandler } from "next/dist/server/next.js";
 import type { Request } from "firebase-functions/v2/https";
 import type { Response } from "express";
+import { IncomingMessage, ServerResponse } from "http";
 
 export function simpleProxy(requestHandler: RequestHandler) {
   return async (originalReq: Request, originalRes: Response, next: () => void) => {
-    console.log("in simple proxy callback");
-    const agent = new Agent({ keepAlive: true });
-    const { method, url: path, headers } = originalReq;
-    if (!method || !path) {
-      console.log("!method || !path");
-      originalRes.end();
-      return;
-    }
-    const { hostname, protocol } = originalReq;
-    const port = protocol === "https" ? 443 : 80;
+    const proxiedRes = proxyResponse(originalReq, originalRes, next);
+    await requestHandler(originalReq, proxiedRes);
+  };
+}
 
-    const host = `${hostname}:${port}`;
-    const opts = {
-      agent,
-      protocol: `${protocol}:`,
-      hostname,
-      port,
-      path,
-      method,
-      headers: {
-        ...headers,
-        host,
-        "X-Forwarded-Host": headers.host,
-      },
-    };
-    const req = httpRequest(opts, (response) => {
-      const { statusCode, statusMessage, headers } = response;
-      if (statusCode === 404) {
+export function proxyResponse(req: IncomingMessage, res: ServerResponse, next: () => void) {
+  const proxiedRes = new ServerResponse(req);
+  const buffer: [string, any[]][] = [];
+
+  proxiedRes.write = new Proxy(proxiedRes.write.bind(proxiedRes), {
+    apply: (target: any, thisArg, args) => {
+      target.call(thisArg, ...args);
+      buffer.push(["write", args]);
+    },
+  });
+  proxiedRes.setHeader = new Proxy(proxiedRes.setHeader.bind(proxiedRes), {
+    apply: (target: any, thisArg, args) => {
+      target.call(thisArg, ...args);
+      buffer.push(["setHeader", args]);
+    },
+  });
+  proxiedRes.removeHeader = new Proxy(proxiedRes.removeHeader.bind(proxiedRes), {
+    apply: (target: any, thisArg, args) => {
+      target.call(thisArg, ...args);
+      buffer.push(["removeHeader", args]);
+    },
+  });
+  proxiedRes.writeHead = new Proxy(proxiedRes.writeHead.bind(proxiedRes), {
+    apply: (target: any, thisArg, args) => {
+      target.call(thisArg, ...args);
+      buffer.push(["writeHead", args]);
+    },
+  });
+  proxiedRes.end = new Proxy(proxiedRes.end.bind(proxiedRes), {
+    apply: (target: any, thisArg, args) => {
+      target.call(thisArg, ...args);
+      if (proxiedRes.statusCode === 404) {
         next();
       } else {
-        originalRes.writeHead(statusCode!, statusMessage, headers);
-        response.pipe(originalRes);
-      }
-    });
-    originalReq.pipe(req);
-    req.on("error", (err) => {
-      console.error("Error encountered while proxying request:", method, path, err);
-      originalRes.end();
-    });
+        for (const [fn, args] of buffer) {
+          console.log({ args });
 
-    await Promise.resolve(requestHandler(originalReq, originalRes));
-  };
+          (res as any)[fn](...args);
+        }
+        res.end(...args);
+      }
+    },
+  });
+  return proxiedRes;
 }
 
 // export function proxyResponse(originalResponse: ServerResponse, next: () => void) {
